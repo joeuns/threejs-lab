@@ -1,0 +1,74 @@
+# ---- Node / Package managers
+node_modules/
+npm-debug.log*
+yarn-debug.log*
+yarn-error.log*
+pnpm-debug.log*
+.pnpm-debug.log*
+
+# ---- Build outputs / Caches
+dist/
+build/
+out/
+.tmp/
+.temp/
+.cache/
+.vite/
+vite.config.ts.timestamp-*
+*.tsbuildinfo
+.eslintcache
+.stylelintcache
+
+# Vite internal cache (may live under node_modules)
+node_modules/.vite/
+
+# ---- Test & Coverage
+coverage/
+.nyc_output/
+
+# ---- Env & secrets
+.env
+.env.*.local
+.env.local
+# Keep sharable templates:
+!.env.example
+
+# ---- OS cruft
+.DS_Store
+.AppleDouble
+.LSOverride
+Thumbs.db
+
+# ---- Editors / IDEs
+.idea/
+.vscode/*
+!.vscode/extensions.json
+!.vscode/settings.json
+!.vscode/tasks.json
+
+# ---- Logs
+logs/
+*.log
+*.log.*
+*.gz
+
+# ---- Python (if you use simple http.server or scripts)
+__pycache__/
+*.py[cod]
+
+# ---- Tools / Deploy
+.netlify/
+.vercel/
+.firebase/
+functions/node_modules/
+
+# ---- Misc
+*.swp
+*.swo
+*.orig
+*.rej
+
+# ---- Optional: ignore lockfiles (보통은 커밋 유지 권장)
+# package-lock.json
+# yarn.lock
+# pnpm-lock.yaml

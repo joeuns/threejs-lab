@@ -1,0 +1,59 @@
+<!-- 유저 상호작용 & 잔상 파일분리 토네이도 -->
+
+<!DOCTYPE html>
+<html lang="ko">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+
+    <title>Three.js Tornado – interactive + afterimage</title>
+    <style>
+      html,
+      body {
+        height: 100%;
+        margin: 0;
+        background: #0b0f14;
+        color: #dbe5ff;
+        font-family: ui-sans-serif, system-ui, -apple-system, Segoe UI, Roboto,
+          Helvetica, Arial;
+      }
+      #app {
+        position: fixed;
+        inset: 0;
+      }
+      .hint {
+        position: fixed;
+        left: 12px;
+        bottom: 12px;
+        opacity: 0.75;
+        font-size: 12px;
+        line-height: 1.35;
+      }
+      .hint kbd {
+        background: #111827;
+        border: 1px solid #394151;
+        border-bottom-width: 2px;
+        border-radius: 6px;
+        padding: 2px 6px;
+        font-weight: 600;
+      }
+      .memo {
+        position: fixed;
+        left: 12px;
+        bottom: 30px;
+        opacity: 0.75;
+        font-size: 12px;
+        line-height: 1.35;
+      }
+    </style>
+  </head>
+  <body>
+    <div id="app"></div>
+    <div class="hint">
+      드래그: 회전 · 휠: 줌 · <kbd>R</kbd>: 리셋 · <kbd>Space</kbd>: 정지/재생 ·
+      마우스: 입자 회피 + 잔상
+    </div>
+    <div class="memo">Radius: 2.5, Strength: 2가 베스트</div>
+    <script type="module" src="./tornado/main.js"></script>
+  </body>
+</html>

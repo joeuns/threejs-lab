@@ -1,0 +1,627 @@
+<!-- 유저 상호작용 & 잔상 토네이도 -->
+<!DOCTYPE html>
+<html lang="ko">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>Three.js Tornado – interactive + afterimage</title>
+    <style>
+      html,
+      body {
+        height: 100%;
+        margin: 0;
+        background: #0b0f14;
+        color: #dbe5ff;
+        font-family: ui-sans-serif, system-ui, -apple-system, Segoe UI, Roboto,
+          Helvetica, Arial;
+      }
+      #app {
+        position: fixed;
+        inset: 0;
+      }
+      .hint {
+        position: fixed;
+        left: 12px;
+        bottom: 12px;
+        opacity: 0.75;
+        font-size: 12px;
+        line-height: 1.35;
+      }
+      .hint kbd {
+        background: #111827;
+        border: 1px solid #394151;
+        border-bottom-width: 2px;
+        border-radius: 6px;
+        padding: 2px 6px;
+        font-weight: 600;
+      }
+      .memo {
+        position: fixed;
+        left: 12px;
+        bottom: 30px;
+        opacity: 0.75;
+        font-size: 12px;
+        line-height: 1.35;
+      }
+    </style>
+  </head>
+  <body>
+    <div id="app"></div>
+    <div class="hint">
+      드래그: 회전 · 휠: 줌 · <kbd>R</kbd>: 리셋 · <kbd>Space</kbd>: 정지/재생 ·
+      마우스: 입자 회피 + 잔상
+    </div>
+    <div class="memo">Radius: 2.5, Strength: 2가 베스트</div>
+
+    <script type="module">
+      // --- Imports
+      import * as THREE from "three";
+      import { OrbitControls } from "three/examples/jsm/controls/OrbitControls.js";
+      import GUI from "lil-gui";
+
+      // --- Renderer / Scene / Camera
+      const container = document.getElementById("app");
+      const renderer = new THREE.WebGLRenderer({
+        antialias: true,
+        alpha: false,
+      });
+      renderer.setPixelRatio(Math.min(2, window.devicePixelRatio));
+      renderer.setSize(window.innerWidth, window.innerHeight);
+      renderer.shadowMap.enabled = true;
+      container.appendChild(renderer.domElement);
+
+      const scene = new THREE.Scene();
+      scene.fog = new THREE.FogExp2(0x0b0f14, 0.015);
+
+      const camera = new THREE.PerspectiveCamera(
+        55,
+        window.innerWidth / window.innerHeight,
+        0.1,
+        500
+      );
+      camera.position.set(10, 7, 16);
+
+      const controls = new OrbitControls(camera, renderer.domElement);
+      controls.enableDamping = true;
+      controls.dampingFactor = 0.06;
+      controls.target.set(0, 5, 0);
+
+      // --- Lights
+      const hemi = new THREE.HemisphereLight(0xbcd3ff, 0x090b10, 0.7);
+      scene.add(hemi);
+      const dir = new THREE.DirectionalLight(0xaec8ff, 1.25);
+      dir.position.set(-6, 12, 6);
+      dir.castShadow = true;
+      dir.shadow.camera.top = 16;
+      dir.shadow.camera.bottom = -8;
+      dir.shadow.camera.left = -12;
+      dir.shadow.camera.right = 12;
+      scene.add(dir);
+
+      // --- Ground
+      const ground = new THREE.Mesh(
+        new THREE.CircleGeometry(14, 64),
+        new THREE.MeshStandardMaterial({
+          color: 0x0d1420,
+          roughness: 1,
+          metalness: 0,
+        })
+      );
+      ground.rotation.x = -Math.PI / 2;
+      ground.receiveShadow = true;
+      scene.add(ground);
+
+      // --- Tornado params
+      const params = {
+        height: 10,
+        baseRadius: 6,
+        topRadius: 2,
+        particles: 6000,
+        swirl: 1.6,
+        updraft: 2.0,
+        wobble: 0.6,
+        innerBoost: 1.6,
+        color: "#a8c7ff",
+        dust: true,
+        pulse: 0.15,
+      };
+
+      // --- Interaction (repulsion) params
+      const interaction = {
+        enabled: true,
+        radius: 1.2,
+        strength: 0.75,
+        falloff: 2.0,
+        lerp: 0.25,
+      };
+
+      // --- Afterimage (trail) params
+      const trail = {
+        enabled: true,
+        max: 180, // 최대 잔상 개수(풀 사이즈)
+        lifespan: 0.6, // 초 단위 수명
+        spawnSpeed: 2.4, // 스폰 임계 속도(월드 유닛/초)
+        spawnInterval: 0.012, // 스폰 최소 간격(초)
+        sizeStart: 0.95, // 시작 스케일(스프라이트)
+        sizeEnd: 0.15, // 종료 스케일
+        opacity: 0.6, // 시작 불투명도
+        swirl: 0.8, // 잔상 자체의 미세 회전 감도
+        drift: 0.2, // 잔상이 천천히 퍼지는 양(월드/초)
+      };
+
+      // --- Utility
+      const radiusAt = (y) =>
+        THREE.MathUtils.lerp(
+          params.topRadius,
+          params.baseRadius,
+          y / params.height
+        );
+      const rnd = (a = 0, b = 1) => a + Math.random() * (b - a);
+
+      // --- Tornado particle system
+      const positions = new Float32Array(params.particles * 3);
+      const speeds = new Float32Array(params.particles);
+      const heights = new Float32Array(params.particles);
+      const radii = new Float32Array(params.particles);
+
+      for (let i = 0; i < params.particles; i++) {
+        const y = rnd(0, params.height);
+        const r = radiusAt(y) * rnd(0.88, 1.02);
+        const a = rnd(0, Math.PI * 2);
+        const x = Math.cos(a) * r,
+          z = Math.sin(a) * r;
+        const idx = i * 3;
+        positions[idx] = x;
+        positions[idx + 1] = y;
+        positions[idx + 2] = z;
+        heights[i] = y;
+        radii[i] = r;
+        const innerFactor = THREE.MathUtils.clamp(
+          1 - r / (params.baseRadius + 1e-4),
+          0.05,
+          1.0
+        );
+        speeds[i] = rnd(0.8, 1.2) * (1 + params.innerBoost * innerFactor);
+      }
+
+      const geom = new THREE.BufferGeometry();
+      geom.setAttribute("position", new THREE.BufferAttribute(positions, 3));
+
+      const mat = new THREE.PointsMaterial({
+        size: 0.08,
+        color: new THREE.Color(params.color),
+        transparent: true,
+        opacity: 0.9,
+        depthWrite: false,
+        blending: THREE.AdditiveBlending,
+        sizeAttenuation: true,
+      });
+
+      const tornado = new THREE.Points(geom, mat);
+      scene.add(tornado);
+
+      // --- Dust ring
+      const dustGeom = new THREE.BufferGeometry();
+      const dustCount = 1200;
+      const dustPos = new Float32Array(dustCount * 3);
+      const dustAng = new Float32Array(dustCount);
+      const dustRad = new Float32Array(dustCount);
+      for (let i = 0; i < dustCount; i++) {
+        dustAng[i] = rnd(0, Math.PI * 2);
+        dustRad[i] = rnd(params.baseRadius * 0.7, params.baseRadius * 1.1);
+        const idx = i * 3;
+        dustPos[idx] = Math.cos(dustAng[i]) * dustRad[i];
+        dustPos[idx + 1] = rnd(0.02, 0.3);
+        dustPos[idx + 2] = Math.sin(dustAng[i]) * dustRad[i];
+      }
+      dustGeom.setAttribute("position", new THREE.BufferAttribute(dustPos, 3));
+      const dustMat = new THREE.PointsMaterial({
+        size: 0.06,
+        color: 0x9fb6ff,
+        transparent: true,
+        opacity: 0.35,
+        depthWrite: false,
+        blending: THREE.AdditiveBlending,
+      });
+      const dust = new THREE.Points(dustGeom, dustMat);
+      dust.visible = params.dust;
+      scene.add(dust);
+
+      // --- Volumetric shell layers
+      const shellGroup = new THREE.Group();
+      const shellLayers = 5;
+      for (let i = 0; i < shellLayers; i++) {
+        const r = params.baseRadius * (0.65 - i * 0.08);
+        const h = params.height * (0.9 - i * 0.1);
+        const tex = new THREE.CanvasTexture(makeNoiseCanvas(256));
+        tex.wrapS = tex.wrapT = THREE.RepeatWrapping;
+        const m = new THREE.MeshBasicMaterial({
+          map: tex,
+          transparent: true,
+          opacity: 0.12,
+          depthWrite: false,
+          blending: THREE.AdditiveBlending,
+        });
+        const g = new THREE.PlaneGeometry(r * 2.2, h * 1.05);
+        const mesh = new THREE.Mesh(g, m);
+        mesh.position.y = h * 0.5;
+        shellGroup.add(mesh);
+      }
+      scene.add(shellGroup);
+
+      function makeNoiseCanvas(size) {
+        const c = document.createElement("canvas");
+        c.width = c.height = size;
+        const ctx = c.getContext("2d");
+        const img = ctx.createImageData(size, size);
+        for (let i = 0; i < img.data.length; i += 4) {
+          const v = Math.random() * 255;
+          img.data[i] = img.data[i + 1] = img.data[i + 2] = v;
+          img.data[i + 3] = Math.random() * 120;
+        }
+        ctx.putImageData(img, 0, 0);
+        return c;
+      }
+
+      // --- Interaction collider
+      const interactionCollider = new THREE.Mesh(
+        new THREE.CylinderGeometry(
+          params.baseRadius * 1.05,
+          params.topRadius * 1.05,
+          params.height,
+          24,
+          1,
+          true
+        ),
+        new THREE.MeshBasicMaterial({ visible: false })
+      );
+      interactionCollider.position.y = params.height * 0.5;
+      scene.add(interactionCollider);
+
+      // --- Raycaster & mouse tracking
+      const raycaster = new THREE.Raycaster();
+      const mouse = new THREE.Vector2();
+      let hoverValid = false;
+      const hoverPoint = new THREE.Vector3();
+      const hoverPointSmoothed = new THREE.Vector3();
+      let lastHoverPoint = new THREE.Vector3();
+      let lastHoverTime = performance.now() * 0.001;
+      let spawnCooldown = 0;
+
+      function updateHoverPoint(ev) {
+        const rect = renderer.domElement.getBoundingClientRect();
+        mouse.x = ((ev.clientX - rect.left) / rect.width) * 2 - 1;
+        mouse.y = -((ev.clientY - rect.top) / rect.height) * 2 + 1;
+        raycaster.setFromCamera(mouse, camera);
+        const hits = raycaster.intersectObject(interactionCollider, false);
+        if (hits.length > 0) {
+          hoverPoint.copy(hits[0].point);
+          hoverValid = true;
+        } else {
+          hoverValid = false;
+        }
+      }
+      renderer.domElement.addEventListener("pointermove", updateHoverPoint);
+      renderer.domElement.addEventListener("pointerleave", () => {
+        hoverValid = false;
+      });
+
+      // --- Afterimage texture (radial gradient)
+      function makeRadial(size = 128) {
+        const c = document.createElement("canvas");
+        c.width = c.height = size;
+        const ctx = c.getContext("2d");
+        const g = ctx.createRadialGradient(
+          size / 2,
+          size / 2,
+          0,
+          size / 2,
+          size / 2,
+          size / 2
+        );
+        g.addColorStop(0, "rgba(255,255,255,1.0)");
+        g.addColorStop(0.5, "rgba(255,255,255,0.35)");
+        g.addColorStop(1, "rgba(255,255,255,0.0)");
+        ctx.fillStyle = g;
+        ctx.fillRect(0, 0, size, size);
+        return new THREE.CanvasTexture(c);
+      }
+      const trailTexture = makeRadial(256);
+
+      // --- Afterimage pool
+      const trailGroup = new THREE.Group();
+      scene.add(trailGroup);
+      const trailPool = [];
+      let trailIndex = 0;
+      const trailMaterial = new THREE.SpriteMaterial({
+        map: trailTexture,
+        color: new THREE.Color("#a8c7ff"),
+        transparent: true,
+        opacity: trail.opacity,
+        depthWrite: false,
+        blending: THREE.AdditiveBlending,
+      });
+
+      for (let i = 0; i < trail.max; i++) {
+        const s = new THREE.Sprite(trailMaterial.clone());
+        s.visible = false;
+        s.scale.set(trail.sizeStart, trail.sizeStart, 1);
+        // 확산/회전에 쓸 보조 상태
+        s.userData = {
+          age: 0,
+          life: trail.lifespan,
+          vel: new THREE.Vector3(),
+          rot: Math.random() * Math.PI * 2,
+        };
+        trailGroup.add(s);
+        trailPool.push(s);
+      }
+
+      function spawnTrail(p, dir, dt) {
+        const s = trailPool[trailIndex];
+        trailIndex = (trailIndex + 1) % trailPool.length;
+        s.position.copy(p);
+        s.userData.age = 0;
+        s.userData.life = trail.lifespan;
+        // 이동 방향 기반 약한 드리프트 + 랜덤 산란
+        const jitter = new THREE.Vector3(
+          rnd(-0.05, 0.05),
+          rnd(-0.02, 0.02),
+          rnd(-0.05, 0.05)
+        );
+        s.userData.vel
+          .copy(dir)
+          .normalize()
+          .multiplyScalar(trail.drift)
+          .add(jitter);
+        s.userData.rot = Math.random() * Math.PI * 2;
+        s.material.opacity = trail.opacity;
+        s.scale.set(trail.sizeStart, trail.sizeStart, 1);
+        s.visible = true;
+      }
+
+      // --- GUI
+      const gui = new GUI({ title: "Tornado Controls" });
+      gui
+        .addColor(params, "color")
+        .name("Color")
+        .onChange((v) => mat.color.set(v));
+      gui
+        .add(params, "height", 6, 18, 0.1)
+        .name("Height")
+        .onChange(syncCollider);
+      gui
+        .add(params, "baseRadius", 3, 10, 0.1)
+        .name("Base Radius")
+        .onChange(syncCollider);
+      gui
+        .add(params, "topRadius", 0.2, 4, 0.1)
+        .name("Top Radius")
+        .onChange(syncCollider);
+      gui.add(params, "swirl", 0.2, 4, 0.05).name("Swirl");
+      gui.add(params, "updraft", 0.2, 5, 0.05).name("Updraft");
+      gui.add(params, "wobble", 0, 1.5, 0.01).name("Wobble");
+      gui.add(params, "innerBoost", 0, 3, 0.05).name("Inner Boost");
+      gui.add(params, "pulse", 0, 0.6, 0.01).name("Pulse");
+      gui
+        .add(params, "dust")
+        .name("Dust ring")
+        .onChange((v) => (dust.visible = v));
+
+      const fInter = gui.addFolder("Interaction");
+      fInter.add(interaction, "enabled").name("Repulsion");
+      fInter.add(interaction, "radius", 0.3, 3.0, 0.05).name("Radius");
+      fInter.add(interaction, "strength", 0.1, 2.0, 0.05).name("Strength");
+      fInter.add(interaction, "falloff", 1.0, 4.0, 0.1).name("Falloff");
+      fInter.add(interaction, "lerp", 0.0, 0.6, 0.01).name("Hover Lerp");
+
+      const fTrail = gui.addFolder("Afterimage");
+      fTrail.add(trail, "enabled").name("Enabled");
+      fTrail.add(trail, "lifespan", 0.2, 1.2, 0.05).name("Lifespan");
+      fTrail.add(trail, "spawnSpeed", 0.2, 6.0, 0.1).name("Spawn Speed");
+      fTrail
+        .add(trail, "spawnInterval", 0.006, 0.06, 0.002)
+        .name("Spawn Interval");
+      fTrail
+        .add(trail, "sizeStart", 0.2, 2.0, 0.05)
+        .name("Size Start")
+        .onChange(() =>
+          trailPool.forEach((s) =>
+            s.scale.set(trail.sizeStart, trail.sizeStart, 1)
+          )
+        );
+      fTrail.add(trail, "sizeEnd", 0.05, 1.0, 0.05).name("Size End");
+      fTrail
+        .add(trail, "opacity", 0.1, 1.0, 0.05)
+        .name("Opacity")
+        .onChange(() =>
+          trailPool.forEach((s) => (s.material.opacity = trail.opacity))
+        );
+      fTrail.add(trail, "swirl", 0.0, 3.0, 0.05).name("Swirl");
+      fTrail.add(trail, "drift", 0.0, 0.6, 0.02).name("Drift");
+
+      function syncCollider() {
+        scene.remove(interactionCollider);
+        interactionCollider.geometry.dispose();
+        interactionCollider.material.dispose();
+        const col = new THREE.Mesh(
+          new THREE.CylinderGeometry(
+            params.baseRadius * 1.05,
+            params.topRadius * 1.05,
+            params.height,
+            24,
+            1,
+            true
+          ),
+          new THREE.MeshBasicMaterial({ visible: false })
+        );
+        col.position.y = params.height * 0.5;
+        interactionCollider.geometry = col.geometry;
+        interactionCollider.material = col.material;
+        interactionCollider.position.copy(col.position);
+        scene.add(interactionCollider);
+      }
+
+      // --- Animation
+      let running = true;
+      let t = 0;
+
+      function animate() {
+        if (!running) {
+          requestAnimationFrame(animate);
+          controls.update();
+          renderer.render(scene, camera);
+          return;
+        }
+
+        const now = performance.now() * 0.001;
+        const dt = Math.min(0.033, 0.016);
+        t += dt;
+        spawnCooldown -= dt;
+
+        // hover 보간
+        if (hoverValid) hoverPointSmoothed.lerp(hoverPoint, interaction.lerp);
+
+        // 파티클 갱신
+        const pos = geom.getAttribute("position");
+        const R = interaction.radius,
+          R2 = R * R,
+          s = interaction.strength;
+
+        for (let i = 0; i < params.particles; i++) {
+          heights[i] +=
+            params.updraft * dt * (0.7 + 0.3 * Math.sin((i * 13.37 + t) * 0.5));
+          if (heights[i] > params.height) heights[i] -= params.height;
+
+          const baseR = radiusAt(heights[i]);
+          const pulse = 1 + params.pulse * Math.sin(t * 1.6 + i * 0.05);
+          const r =
+            baseR * pulse * (0.92 + 0.16 * Math.sin(i * 0.23 + t * 0.9));
+          radii[i] = r;
+
+          const spin = speeds[i] * params.swirl * dt;
+          const angle = t * spin * 8.0 + i;
+
+          const wobX =
+            params.wobble *
+            Math.sin(t * 0.9) *
+            (1 - heights[i] / params.height);
+          const wobZ =
+            params.wobble *
+            Math.cos(t * 1.1) *
+            (1 - heights[i] / params.height);
+
+          let x = Math.cos(angle) * r + wobX;
+          let z = Math.sin(angle) * r + wobZ;
+          let y = heights[i];
+
+          // 마우스 반발
+          if (interaction.enabled && hoverValid) {
+            const dx = x - hoverPointSmoothed.x;
+            const dy = y - hoverPointSmoothed.y;
+            const dz = z - hoverPointSmoothed.z;
+            const d2 = dx * dx + dy * dy + dz * dz;
+            if (d2 < R2) {
+              const d = Math.sqrt(d2) + 1e-6;
+              const w = Math.pow(1 - d / R, interaction.falloff) * s;
+              const inv = w / d;
+              x += dx * inv;
+              y += dy * inv * 0.5; // 과도한 점프 방지
+              z += dz * inv;
+            }
+          }
+
+          const idx = i * 3;
+          pos.array[idx] = x;
+          pos.array[idx + 1] = y;
+          pos.array[idx + 2] = z;
+        }
+        pos.needsUpdate = true;
+
+        // Dust 회전
+        const dpos = dustGeom.getAttribute("position");
+        for (let i = 0; i < dustCount; i++) {
+          dustAng[i] += dt * (0.6 + 0.5 * Math.sin(i * 0.07 + t));
+          const idx = i * 3;
+          dpos.array[idx] = Math.cos(dustAng[i]) * dustRad[i];
+          dpos.array[idx + 2] = Math.sin(dustAng[i]) * dustRad[i];
+        }
+        dpos.needsUpdate = true;
+
+        // Shells
+        shellGroup.children.forEach((mesh, i) => {
+          mesh.lookAt(camera.position.x, mesh.position.y, camera.position.z);
+          mesh.material.map.offset.y = (t * 0.06 * (i + 1)) % 1;
+          mesh.material.opacity = 0.1 + 0.05 * Math.sin(t * 1.2 + i);
+        });
+
+        // --- Afterimage: 스폰 & 업데이트
+        if (trail.enabled && hoverValid) {
+          // 프레임 간 hover 이동 속도(월드/초) 추정
+          const dx = hoverPointSmoothed.x - lastHoverPoint.x;
+          const dy = hoverPointSmoothed.y - lastHoverPoint.y;
+          const dz = hoverPointSmoothed.z - lastHoverPoint.z;
+          const dist = Math.sqrt(dx * dx + dy * dy + dz * dz);
+          const dtHover = Math.max(1e-4, now - lastHoverTime);
+          const speed = dist / dtHover;
+
+          if (speed > trail.spawnSpeed && spawnCooldown <= 0) {
+            spawnTrail(
+              hoverPointSmoothed,
+              new THREE.Vector3(dx, dy, dz),
+              dtHover
+            );
+            spawnCooldown = trail.spawnInterval;
+          }
+
+          lastHoverPoint.copy(hoverPointSmoothed);
+          lastHoverTime = now;
+        }
+
+        // 잔상 업데이트(수명/감쇠/드리프트/회전)
+        for (const spt of trailPool) {
+          if (!spt.visible) continue;
+          spt.userData.age += dt;
+          const tNorm = spt.userData.age / spt.userData.life;
+          if (tNorm >= 1) {
+            spt.visible = false;
+            continue;
+          }
+
+          // 스케일과 투명도 감쇠(부드럽게)
+          const k = 1 - tNorm;
+          const scale = THREE.MathUtils.lerp(
+            trail.sizeStart,
+            trail.sizeEnd,
+            1 - k * k
+          );
+          spt.scale.set(scale, scale, 1);
+          spt.material.opacity = trail.opacity * k * k;
+
+          // 드리프트 및 소용돌이 회전
+          spt.position.addScaledVector(spt.userData.vel, dt);
+          spt.userData.rot += trail.swirl * dt;
+          spt.material.rotation = spt.userData.rot;
+        }
+
+        controls.update();
+        renderer.render(scene, camera);
+        requestAnimationFrame(animate);
+      }
+      requestAnimationFrame(animate);
+
+      // --- Resize
+      window.addEventListener("resize", () => {
+        camera.aspect = window.innerWidth / window.innerHeight;
+        camera.updateProjectionMatrix();
+        renderer.setSize(window.innerWidth, window.innerHeight);
+      });
+
+      // --- Keyboard
+      window.addEventListener("keydown", (e) => {
+        if (e.code === "Space") running = !running;
+        if (e.key.toLowerCase() === "r") controls.reset();
+      });
+    </script>
+  </body>
+</html>

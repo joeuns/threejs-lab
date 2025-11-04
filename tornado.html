@@ -1,0 +1,350 @@
+<!-- 맨 처음 토네이도 -->
+
+<!DOCTYPE html>
+<html lang="ko">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>Three.js Tornado – quick prototype</title>
+    <style>
+      html,
+      body {
+        height: 100%;
+        margin: 0;
+        background: #0b0f14;
+        color: #dbe5ff;
+        font-family: ui-sans-serif, system-ui, -apple-system, Segoe UI, Roboto,
+          Helvetica, Arial;
+      }
+      #app {
+        position: fixed;
+        inset: 0;
+      }
+      .hint {
+        position: fixed;
+        left: 12px;
+        bottom: 12px;
+        opacity: 0.75;
+        font-size: 12px;
+        line-height: 1.35;
+      }
+      .hint kbd {
+        background: #111827;
+        border: 1px solid #394151;
+        border-bottom-width: 2px;
+        border-radius: 6px;
+        padding: 2px 6px;
+        font-weight: 600;
+      }
+    </style>
+  </head>
+  <body>
+    <div id="app"></div>
+    <div class="hint">
+      드래그: 회전 · 휠: 줌 · <kbd>R</kbd>: 리셋 · <kbd>Space</kbd>: 정지/재생
+    </div>
+
+    <script type="module">
+      // --- Imports
+      import * as THREE from "three";
+      import { OrbitControls } from "three/examples/jsm/controls/OrbitControls.js";
+      import GUI from "lil-gui";
+
+      // --- Renderer / Scene / Camera
+      const container = document.getElementById("app");
+      const renderer = new THREE.WebGLRenderer({
+        antialias: true,
+        alpha: false,
+      });
+      renderer.setPixelRatio(Math.min(2, window.devicePixelRatio));
+      renderer.setSize(window.innerWidth, window.innerHeight);
+      renderer.shadowMap.enabled = true;
+      container.appendChild(renderer.domElement);
+
+      const scene = new THREE.Scene();
+      scene.fog = new THREE.FogExp2(0x0b0f14, 0.015);
+
+      const camera = new THREE.PerspectiveCamera(
+        55,
+        window.innerWidth / window.innerHeight,
+        0.1,
+        500
+      );
+      camera.position.set(10, 7, 16);
+
+      const controls = new OrbitControls(camera, renderer.domElement);
+      controls.enableDamping = true;
+      controls.dampingFactor = 0.06;
+      controls.target.set(0, 5, 0);
+
+      // --- Lights
+      const hemi = new THREE.HemisphereLight(0xbcd3ff, 0x090b10, 0.7);
+      scene.add(hemi);
+      const dir = new THREE.DirectionalLight(0xaec8ff, 1.25);
+      dir.position.set(-6, 12, 6);
+      dir.castShadow = true;
+      dir.shadow.camera.top = 16;
+      dir.shadow.camera.bottom = -8;
+      dir.shadow.camera.left = -12;
+      dir.shadow.camera.right = 12;
+      scene.add(dir);
+
+      // --- Ground
+      const ground = new THREE.Mesh(
+        new THREE.CircleGeometry(14, 64),
+        new THREE.MeshStandardMaterial({
+          color: 0x0d1420,
+          roughness: 1,
+          metalness: 0,
+        })
+      );
+      ground.rotation.x = -Math.PI / 2;
+      ground.receiveShadow = true;
+      scene.add(ground);
+
+      // --- Tornado parameters
+      const params = {
+        height: 10, // 토네이도 높이
+        baseRadius: 6, // 바닥 반지름
+        topRadius: 2, // 상단 반지름
+        particles: 6000, // 파티클 수
+        swirl: 1.6, // 나선 강도(회전 속도 스케일)
+        updraft: 2.0, // 위로 빨려올라가는 속도
+        wobble: 0.6, // 원뿔 흔들림(불안정성)
+        innerBoost: 1.6, // 중심부 가속 (안쪽이 더 빠르게)
+        color: "#a8c7ff",
+        dust: true,
+        pulse: 0.15, // 호흡하듯 두께가 살짝 변함
+      };
+
+      // --- Utility: cone radius at given height (y = 0..height)
+      const radiusAt = (y) => {
+        const t = y / params.height; // 0(bottom) -> 1(top)
+        return THREE.MathUtils.lerp(params.topRadius, params.baseRadius, t);
+      };
+
+      // --- Create tornado particle system
+      const positions = new Float32Array(params.particles * 3);
+      const speeds = new Float32Array(params.particles); // 각 파티클 고유 회전속도
+      const heights = new Float32Array(params.particles); // y 진행도 [0, height)
+      const radii = new Float32Array(params.particles); // 현재 반경(업데이트용 캐시)
+
+      const rnd = (a = 0, b = 1) => a + Math.random() * (b - a);
+
+      for (let i = 0; i < params.particles; i++) {
+        const y = rnd(0, params.height);
+        const r = radiusAt(y) * rnd(0.88, 1.02); // 살짝 퍼짐
+        const a = rnd(0, Math.PI * 2);
+        const x = Math.cos(a) * r;
+        const z = Math.sin(a) * r;
+        const idx = i * 3;
+        positions[idx] = x;
+        positions[idx + 1] = y;
+        positions[idx + 2] = z;
+        heights[i] = y;
+        radii[i] = r;
+        const innerFactor = THREE.MathUtils.clamp(
+          1 - r / (params.baseRadius + 0.0001),
+          0.05,
+          1.0
+        );
+        speeds[i] = rnd(0.8, 1.2) * (1 + params.innerBoost * innerFactor); // 안쪽일수록 더 빠름
+      }
+
+      const geom = new THREE.BufferGeometry();
+      geom.setAttribute("position", new THREE.BufferAttribute(positions, 3));
+
+      const mat = new THREE.PointsMaterial({
+        size: 0.08,
+        color: new THREE.Color(params.color),
+        transparent: true,
+        opacity: 0.9,
+        depthWrite: false,
+        blending: THREE.AdditiveBlending,
+        sizeAttenuation: true,
+      });
+
+      const tornado = new THREE.Points(geom, mat);
+      tornado.castShadow = false;
+      scene.add(tornado);
+
+      // --- Dust ring near ground
+      const dustGeom = new THREE.BufferGeometry();
+      const dustCount = 1200;
+      const dustPos = new Float32Array(dustCount * 3);
+      const dustAng = new Float32Array(dustCount);
+      const dustRad = new Float32Array(dustCount);
+      for (let i = 0; i < dustCount; i++) {
+        dustAng[i] = rnd(0, Math.PI * 2);
+        dustRad[i] = rnd(params.baseRadius * 0.7, params.baseRadius * 1.1);
+        const idx = i * 3;
+        dustPos[idx] = Math.cos(dustAng[i]) * dustRad[i];
+        dustPos[idx + 1] = rnd(0.02, 0.3);
+        dustPos[idx + 2] = Math.sin(dustAng[i]) * dustRad[i];
+      }
+      dustGeom.setAttribute("position", new THREE.BufferAttribute(dustPos, 3));
+      const dustMat = new THREE.PointsMaterial({
+        size: 0.06,
+        color: 0x9fb6ff,
+        transparent: true,
+        opacity: 0.35,
+        depthWrite: false,
+        blending: THREE.AdditiveBlending,
+      });
+      const dust = new THREE.Points(dustGeom, dustMat);
+      dust.visible = params.dust;
+      scene.add(dust);
+
+      // --- Subtle volumetric look: billboarded sprites as shell layers (cheap)
+      const shellGroup = new THREE.Group();
+      const shellLayers = 5;
+      for (let i = 0; i < shellLayers; i++) {
+        const r = params.baseRadius * (0.65 - i * 0.08);
+        const h = params.height * (0.9 - i * 0.1);
+        const tex = new THREE.CanvasTexture(makeNoiseCanvas(256));
+        tex.wrapS = tex.wrapT = THREE.RepeatWrapping;
+        const m = new THREE.MeshBasicMaterial({
+          map: tex,
+          transparent: true,
+          opacity: 0.12,
+          depthWrite: false,
+          blending: THREE.AdditiveBlending,
+        });
+        const g = new THREE.PlaneGeometry(r * 2.2, h * 1.05, 1, 1);
+        const mesh = new THREE.Mesh(g, m);
+        mesh.position.y = h * 0.5;
+        shellGroup.add(mesh);
+      }
+      scene.add(shellGroup);
+
+      function makeNoiseCanvas(size) {
+        const c = document.createElement("canvas");
+        c.width = c.height = size;
+        const ctx = c.getContext("2d");
+        const img = ctx.createImageData(size, size);
+        for (let i = 0; i < img.data.length; i += 4) {
+          const v = Math.random() * 255;
+          img.data[i] = img.data[i + 1] = img.data[i + 2] = v;
+          img.data[i + 3] = Math.random() * 120; // 투명도 다양화
+        }
+        ctx.putImageData(img, 0, 0);
+        return c;
+      }
+
+      // --- GUI
+      const gui = new GUI({ title: "Tornado Controls" });
+      gui
+        .addColor(params, "color")
+        .name("Color")
+        .onChange((v) => mat.color.set(v));
+      gui.add(params, "height", 6, 18, 0.1).name("Height");
+      gui.add(params, "baseRadius", 3, 10, 0.1).name("Base Radius");
+      gui.add(params, "topRadius", 0.2, 4, 0.1).name("Top Radius");
+      gui.add(params, "swirl", 0.2, 4, 0.05).name("Swirl");
+      gui.add(params, "updraft", 0.2, 5, 0.05).name("Updraft");
+      gui.add(params, "wobble", 0, 1.5, 0.01).name("Wobble");
+      gui.add(params, "innerBoost", 0, 3, 0.05).name("Inner Boost");
+      gui.add(params, "pulse", 0, 0.6, 0.01).name("Pulse");
+      gui
+        .add(params, "dust")
+        .name("Dust ring")
+        .onChange((v) => (dust.visible = v));
+
+      // --- Animation
+      let running = true;
+      let t = 0;
+
+      function animate() {
+        if (!running) {
+          requestAnimationFrame(animate);
+          controls.update();
+          renderer.render(scene, camera);
+          return;
+        }
+        const dt = Math.min(
+          0.033,
+          renderer.info.render.frame < 1 ? 0.016 : 0.016
+        ); // 고정 스텝
+        t += dt;
+
+        const pos = geom.getAttribute("position");
+        for (let i = 0; i < params.particles; i++) {
+          // 진행
+          heights[i] +=
+            params.updraft * dt * (0.7 + 0.3 * Math.sin((i * 13.37 + t) * 0.5));
+          if (heights[i] > params.height) heights[i] -= params.height; // 래핑
+
+          // 현재 반경 + 약간의 펄스(호흡)
+          const baseR = radiusAt(heights[i]);
+          const pulse = 1 + params.pulse * Math.sin(t * 1.6 + i * 0.05);
+          const r =
+            baseR * pulse * (0.92 + 0.16 * Math.sin(i * 0.23 + t * 0.9));
+          radii[i] = r;
+
+          // 회전 각도: 속도 * 나선강도 * 반경 영향
+          const spin = speeds[i] * params.swirl * dt;
+          const angle = t * spin * 8.0 + i; // 각 파티클 위상 다르게
+
+          // 원뿔 축의 흔들림 (wobble)
+          const wobX =
+            params.wobble *
+            Math.sin(t * 0.9) *
+            (1 - heights[i] / params.height);
+          const wobZ =
+            params.wobble *
+            Math.cos(t * 1.1) *
+            (1 - heights[i] / params.height);
+
+          const x = Math.cos(angle) * r + wobX;
+          const z = Math.sin(angle) * r + wobZ;
+          const y = heights[i];
+
+          const idx = i * 3;
+          pos.array[idx] = x;
+          pos.array[idx + 1] = y;
+          pos.array[idx + 2] = z;
+        }
+        pos.needsUpdate = true;
+
+        // Dust ring 회전
+        const dpos = dustGeom.getAttribute("position");
+        for (let i = 0; i < dustCount; i++) {
+          dustAng[i] += dt * (0.6 + 0.5 * Math.sin(i * 0.07 + t));
+          const idx = i * 3;
+          dpos.array[idx] = Math.cos(dustAng[i]) * dustRad[i];
+          dpos.array[idx + 2] = Math.sin(dustAng[i]) * dustRad[i];
+        }
+        dpos.needsUpdate = true;
+
+        // Shells: 카메라 항상 바라보도록 & 텍스처 흘림
+        shellGroup.children.forEach((mesh, i) => {
+          mesh.lookAt(camera.position.x, mesh.position.y, camera.position.z);
+          mesh.material.map.offset.y = (t * 0.06 * (i + 1)) % 1;
+          mesh.material.opacity = 0.1 + 0.05 * Math.sin(t * 1.2 + i);
+        });
+
+        controls.update();
+        renderer.render(scene, camera);
+        requestAnimationFrame(animate);
+      }
+      requestAnimationFrame(animate);
+
+      // --- Resize
+      window.addEventListener("resize", () => {
+        camera.aspect = window.innerWidth / window.innerHeight;
+        camera.updateProjectionMatrix();
+        renderer.setSize(window.innerWidth, window.innerHeight);
+      });
+
+      // --- Keyboard helpers
+      window.addEventListener("keydown", (e) => {
+        if (e.code === "Space") {
+          running = !running;
+        }
+        if (e.key.toLowerCase() === "r") {
+          controls.reset();
+        }
+      });
+    </script>
+  </body>
+</html>

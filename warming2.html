@@ -1,0 +1,356 @@
+<!DOCTYPE html>
+<html lang="ko">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>Three.js – Heat Rise / Heat Haze (Minimal)</title>
+    <style>
+      html,
+      body {
+        margin: 0;
+        height: 100%;
+        background: #0b0f14;
+        color: #e7ecff;
+        font: 14px/1.4 ui-sans-serif, system-ui, -apple-system, Segoe UI, Roboto,
+          Helvetica, Arial;
+      }
+      #app {
+        position: fixed;
+        inset: 0;
+      }
+      .hint {
+        position: fixed;
+        left: 12px;
+        bottom: 12px;
+        opacity: 0.8;
+        font-size: 12px;
+      }
+      .hint kbd {
+        background: #111827;
+        border: 1px solid #394151;
+        border-bottom-width: 2px;
+        border-radius: 6px;
+        padding: 2px 6px;
+        font-weight: 600;
+      }
+    </style>
+  </head>
+  <body>
+    <div id="app"></div>
+    <div class="hint">드래그: 회전 · 휠: 줌 · <kbd>Space</kbd>: 정지/재생</div>
+
+    <script type="module">
+      import * as THREE from "three";
+      import { OrbitControls } from "three/examples/jsm/controls/OrbitControls.js";
+
+      // --- Renderer / Scene / Camera
+      const container = document.getElementById("app");
+      const renderer = new THREE.WebGLRenderer({
+        antialias: true,
+        alpha: false,
+      });
+      renderer.setPixelRatio(Math.min(2, window.devicePixelRatio));
+      renderer.setSize(innerWidth, innerHeight);
+      container.appendChild(renderer.domElement);
+
+      const scene = new THREE.Scene();
+      scene.background = new THREE.Color(0x0b0f14);
+      scene.fog = new THREE.FogExp2(0x0b0f14, 0.02);
+
+      const camera = new THREE.PerspectiveCamera(
+        55,
+        innerWidth / innerHeight,
+        0.1,
+        500
+      );
+      camera.position.set(7, 6, 12);
+
+      const controls = new OrbitControls(camera, renderer.domElement);
+      controls.enableDamping = true;
+      controls.dampingFactor = 0.06;
+      controls.target.set(0, 2, 0);
+
+      // --- Lights (태양 느낌)
+      // --- Lights & Visible Sun (오른쪽 배치)
+      const sunDir = new THREE.DirectionalLight(0xffe2a6, 1.25);
+      const sunPos = new THREE.Vector3(10, 6, 0); // 오른쪽 상단 쪽에 배치
+      sunDir.position.copy(sunPos.clone().normalize().multiplyScalar(12));
+      scene.add(new THREE.AmbientLight(0xffc98a, 0.25));
+      scene.add(sunDir);
+
+      // 태양 글로우 스프라이트 텍스처
+      function makeSunTexture(size = 256) {
+        const c = document.createElement("canvas");
+        c.width = c.height = size;
+        const ctx = c.getContext("2d");
+        const g = ctx.createRadialGradient(
+          size / 2,
+          size / 2,
+          size * 0.05,
+          size / 2,
+          size / 2,
+          size * 0.5
+        );
+        g.addColorStop(0, "rgba(255, 230, 160, 1)");
+        g.addColorStop(0.35, "rgba(255, 195, 80, 0.9)");
+        g.addColorStop(1, "rgba(255, 160, 60, 0)");
+        ctx.fillStyle = g;
+        ctx.fillRect(0, 0, size, size);
+        return new THREE.CanvasTexture(c);
+      }
+      const sunGlowTex = makeSunTexture(512);
+      const sunSprite = new THREE.Sprite(
+        new THREE.SpriteMaterial({
+          map: sunGlowTex,
+          transparent: true,
+          depthWrite: false,
+          blending: THREE.AdditiveBlending,
+        })
+      );
+      sunSprite.scale.set(6, 6, 1);
+      sunSprite.position.copy(sunPos);
+      scene.add(sunSprite);
+
+      // 태양 코어(살짝 발광하는 구)
+      const sunCore = new THREE.Mesh(
+        new THREE.SphereGeometry(0.6, 32, 16),
+        new THREE.MeshStandardMaterial({
+          color: 0xfff2b3,
+          emissive: 0xff9f42,
+          emissiveIntensity: 1.8,
+          roughness: 0.3,
+          metalness: 0,
+        })
+      );
+      sunCore.position.copy(sunPos);
+      scene.add(sunCore);
+
+      // --- Ground plane (열기의 발원 느낌)
+      const ground = new THREE.Mesh(
+        new THREE.CircleGeometry(20, 72),
+        new THREE.MeshStandardMaterial({
+          color: 0x1a2430,
+          roughness: 1,
+          metalness: 0,
+        })
+      );
+      ground.rotation.x = -Math.PI / 2;
+      ground.receiveShadow = true;
+      scene.add(ground);
+
+      // --- Rising hot-air particles (위로 올라가는 입자)
+      // --- Sun emission particles (태양에서 뿜어져 나오는 입자)
+      const P = 2400; // particle count
+      const pPos = new Float32Array(P * 3);
+      const pVel = new Float32Array(P * 3); // 속도 벡터
+      const pPhase = new Float32Array(P);
+
+      function spawnFromSun(i) {
+        // 태양 위치 근처에서 약간 퍼져 시작
+        const jitter = new THREE.Vector3(
+          (Math.random() - 0.5) * 0.4,
+          (Math.random() - 0.5) * 0.4,
+          (Math.random() - 0.5) * 0.4
+        );
+        const start = sunPos.clone().add(jitter);
+        pPos[i * 3] = start.x;
+        pPos[i * 3 + 1] = start.y;
+        pPos[i * 3 + 2] = start.z;
+
+        // 왼쪽(씬 중앙) 방향으로 기본 추진, 약간 위 방향 + 랜덤 확산
+        const dir = new THREE.Vector3(
+          -1,
+          0.15,
+          (Math.random() - 0.5) * 0.3
+        ).normalize();
+        const speed = 0.8 + Math.random() * 0.9;
+        pVel[i * 3] = dir.x * speed;
+        pVel[i * 3 + 1] = dir.y * speed;
+        pVel[i * 3 + 2] = dir.z * speed;
+
+        pPhase[i] = Math.random() * Math.PI * 2;
+      }
+
+      for (let i = 0; i < P; i++) {
+        spawnFromSun(i);
+      }
+
+      const pGeom = new THREE.BufferGeometry();
+      pGeom.setAttribute("position", new THREE.BufferAttribute(pPos, 3));
+      const pMat = new THREE.PointsMaterial({
+        color: 0xffb86b,
+        size: 0.06,
+        transparent: true,
+        opacity: 0.8,
+        depthWrite: false,
+        blending: THREE.AdditiveBlending,
+      });
+      const hotAir = new THREE.Points(pGeom, pMat);
+      scene.add(hotAir);
+
+      // --- Sky dome (연하게 오렌지 그라데)
+      const skyGeo = new THREE.SphereGeometry(60, 32, 16);
+      const skyMat = new THREE.ShaderMaterial({
+        side: THREE.BackSide,
+        uniforms: {
+          top: { value: new THREE.Color(0x20354a) },
+          bottom: { value: new THREE.Color(0x3a1f12) },
+        },
+        vertexShader: `varying vec3 vWorld; void main(){ vec4 w = modelMatrix * vec4(position,1.0); vWorld = w.xyz; gl_Position = projectionMatrix * viewMatrix * w; }`,
+        fragmentShader: `varying vec3 vWorld; uniform vec3 top; uniform vec3 bottom; void main(){ float h = normalize(vWorld).y*0.5+0.5; vec3 col = mix(bottom, top, smoothstep(0.0,1.0,h)); gl_FragColor = vec4(col,1.0); }`,
+      });
+      scene.add(new THREE.Mesh(skyGeo, skyMat));
+
+      // --- Postprocess: Heat Haze (렌더타깃 -> 스크린 퀴드)
+      const rt = new THREE.WebGLRenderTarget(innerWidth, innerHeight, {
+        samples: 0,
+      });
+
+      const screenScene = new THREE.Scene();
+      const screenCam = new THREE.OrthographicCamera(-1, 1, 1, -1, 0, 1);
+
+      const heatUniforms = {
+        tDiffuse: { value: null },
+        time: { value: 0 },
+        intensity: { value: 0.015 }, // 왜곡 강도
+        horizon: { value: 0.45 }, // 화면에서 열기 중심 높이(0=아래,1=위)
+        falloff: { value: 0.6 }, // 위로 갈수록 약해지는 정도
+      };
+
+      const fsQuad = new THREE.Mesh(
+        new THREE.PlaneGeometry(2, 2),
+        new THREE.ShaderMaterial({
+          uniforms: heatUniforms,
+          transparent: false,
+          vertexShader: `
+          varying vec2 vUv;
+          void main(){ vUv = uv; gl_Position = vec4(position.xy,0.0,1.0); }
+        `,
+          fragmentShader: `
+          precision highp float;
+          varying vec2 vUv; uniform sampler2D tDiffuse; uniform float time; uniform float intensity; uniform float horizon; uniform float falloff;
+
+          // 간단한 해시 기반 노이즈
+          float hash(vec2 p){ return fract(sin(dot(p, vec2(127.1,311.7))) * 43758.5453); }
+          float noise(vec2 p){
+            vec2 i = floor(p), f = fract(p);
+            float a = hash(i);
+            float b = hash(i + vec2(1.0,0.0));
+            float c = hash(i + vec2(0.0,1.0));
+            float d = hash(i + vec2(1.0,1.0));
+            vec2 u = f*f*(3.0-2.0*f);
+            return mix(a, b, u.x) + (c - a)*u.y*(1.0 - u.x) + (d - b)*u.x*u.y;
+          }
+          float fbm(vec2 p){
+            float v=0.0; float a=0.5; for(int i=0;i<5;i++){ v += a*noise(p); p*=2.02; a*=0.55; } return v;
+          }
+          void main(){
+            // 열기 강도: 화면 아래쪽에서 강하고 위로 갈수록 감소
+            float y = vUv.y;
+            float zone = clamp(1.0 - smoothstep(horizon, horizon+falloff, y), 0.0, 1.0);
+
+            // 아지랑이 왜곡 벡터
+            vec2 n = vec2(
+              fbm(vUv*4.0 + vec2(0.0, time*0.3)),
+              fbm(vUv*4.0 + vec2(5.2, time*0.28))
+            );
+            vec2 offset = (n - 0.5) * intensity * (0.3 + 0.7*zone);
+
+            // 굴절(uv 오프셋) 샘플
+            vec4 col = texture2D(tDiffuse, vUv + offset);
+
+            // 따뜻한 색감 살짝 추가(아래쪽 중심)
+            vec3 warm = vec3(1.0, 0.55, 0.2);
+            col.rgb = mix(col.rgb, col.rgb * warm, 0.12 * zone);
+
+            gl_FragColor = col;
+          }
+        `,
+        })
+      );
+      screenScene.add(fsQuad);
+
+      // --- Animation
+      // --- Animation
+      let running = true;
+      let t = 0;
+      function animate() {
+        requestAnimationFrame(animate);
+        if (!running) {
+          controls.update();
+          renderer.setRenderTarget(null);
+          renderer.render(scene, camera);
+          return;
+        }
+
+        const dt = 0.016;
+        t += dt;
+        heatUniforms.time.value = t;
+
+        // 입자 업데이트: 태양에서 좌측/전방으로 분출 + 소량의 요동 + 약한 중력 하강 보정
+        const arr = pGeom.getAttribute("position").array;
+        for (let i = 0; i < P; i++) {
+          const idx = i * 3;
+
+          // 미세 요동(열의 요철감)
+          const swayX = 0.06 * Math.sin(t * 1.2 + pPhase[i]);
+          const swayY = 0.04 * Math.cos(t * 1.6 + pPhase[i] * 1.3);
+          const swayZ = 0.06 * Math.sin(t * 1.1 + pPhase[i] * 0.7);
+
+          // 속도 업데이트(아주 약한 상승 열류 + 살짝 하강으로 밸런스)
+          pVel[idx + 1] += 0.02 * dt; // 상승 성분
+          pVel[idx + 1] -= 0.015 * dt; // 하강 보정으로 과상승 방지
+
+          // 위치 업데이트
+          arr[idx] += pVel[idx] * dt + swayX * dt;
+          arr[idx + 1] += pVel[idx + 1] * dt + swayY * dt;
+          arr[idx + 2] += pVel[idx + 2] * dt + swayZ * dt;
+
+          // 수명 판정: 태양에서 너무 멀어지면 재스폰
+          const dx = arr[idx] - sunPos.x;
+          const dy = arr[idx + 1] - sunPos.y;
+          const dz = arr[idx + 2] - sunPos.z;
+          const dist2 = dx * dx + dy * dy + dz * dz;
+          if (dist2 > 180 || arr[idx + 1] < -1 || arr[idx + 1] > 20) {
+            spawnFromSun(i);
+          }
+        }
+        pGeom.attributes.position.needsUpdate = true;
+
+        // 태양 발광/광량 박동
+        const pulse = 1.2 + 0.3 * Math.sin(t * 0.5);
+        sunDir.intensity = 1.0 + 0.4 * Math.sin(t * 0.25);
+        sunSprite.scale.set(6 * pulse * 0.9, 6 * pulse * 0.9, 1);
+
+        // 1) 씬을 렌더타깃에 렌더
+        renderer.setRenderTarget(rt);
+        renderer.render(scene, camera);
+
+        // 2) 포스트(heat haze)
+        renderer.setRenderTarget(null);
+        heatUniforms.tDiffuse.value = rt.texture;
+        renderer.render(screenScene, screenCam);
+
+        controls.update();
+      }
+      requestAnimationFrame(animate);
+
+      // --- Resize
+      addEventListener("resize", () => {
+        camera.aspect = innerWidth / innerHeight;
+        camera.updateProjectionMatrix();
+        renderer.setSize(innerWidth, innerHeight);
+        const newRT = new THREE.WebGLRenderTarget(innerWidth, innerHeight, {
+          samples: 0,
+        });
+        rt.dispose();
+        Object.assign(rt, newRT); // 간단 교체
+      });
+
+      // --- Keys
+      addEventListener("keydown", (e) => {
+        if (e.code === "Space") running = !running;
+      });
+    </script>
+  </body>
+</html>
