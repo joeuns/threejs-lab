@@ -1,0 +1,500 @@
+<!-- heat-rise.html : 온도상승 – 태양 + 열기 입자(지속 배출) + 아지랑이 굴절 + 초반 밝기 완화 -->
+<!DOCTYPE html>
+<html lang="ko">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>Three.js Heat Rise – Sun & Heat Particles</title>
+    <style>
+      html,
+      body {
+        height: 100%;
+        margin: 0;
+        background: #06080c;
+        color: #e8f0ff;
+        font-family: ui-sans-serif, system-ui, -apple-system, Segoe UI, Roboto,
+          Helvetica, Arial;
+      }
+      #app {
+        position: fixed;
+        inset: 0;
+      }
+      .hint {
+        position: fixed;
+        left: 12px;
+        bottom: 12px;
+        opacity: 0.75;
+        font-size: 12px;
+        line-height: 1.35;
+      }
+      .hint kbd {
+        background: #0f172a;
+        border: 1px solid #334155;
+        border-bottom-width: 2px;
+        border-radius: 6px;
+        padding: 2px 6px;
+        font-weight: 600;
+      }
+    </style>
+  </head>
+  <body>
+    <div id="app"></div>
+    <div class="hint">
+      드래그: 회전 · 휠: 줌 · <kbd>R</kbd>: 리셋 · <kbd>Space</kbd>: 정지/재생
+    </div>
+
+    <script type="module">
+      import * as THREE from "three";
+      import { OrbitControls } from "three/examples/jsm/controls/OrbitControls.js";
+      import { EffectComposer } from "three/examples/jsm/postprocessing/EffectComposer.js";
+      import { RenderPass } from "three/examples/jsm/postprocessing/RenderPass.js";
+      import { UnrealBloomPass } from "three/examples/jsm/postprocessing/UnrealBloomPass.js";
+      import { ShaderPass } from "three/examples/jsm/postprocessing/ShaderPass.js";
+      import GUI from "lil-gui";
+
+      // --- Renderer / Scene / Camera
+      const container = document.getElementById("app");
+      const renderer = new THREE.WebGLRenderer({ antialias: true });
+      renderer.setPixelRatio(Math.min(2, window.devicePixelRatio));
+      renderer.setSize(window.innerWidth, window.innerHeight);
+      renderer.outputColorSpace = THREE.SRGBColorSpace;
+      renderer.toneMapping = THREE.ACESFilmicToneMapping;
+      container.appendChild(renderer.domElement);
+
+      const scene = new THREE.Scene();
+      scene.fog = new THREE.FogExp2(0x06080c, 0.03);
+
+      const camera = new THREE.PerspectiveCamera(
+        55,
+        innerWidth / innerHeight,
+        0.1,
+        200
+      );
+      camera.position.set(0, 10, 0);
+      camera.up.set(0, 0, 1); // 탑뷰 안정화 (중요)
+      camera.lookAt(0, 0, 0);
+
+      const controls = new OrbitControls(camera, renderer.domElement);
+      controls.enableDamping = true;
+      controls.dampingFactor = 0.06;
+
+      // --- Ground
+      const ground = new THREE.Mesh(
+        new THREE.CircleGeometry(20, 80),
+        new THREE.MeshStandardMaterial({
+          color: 0x0a0f16,
+          roughness: 1,
+          metalness: 0,
+        })
+      );
+      ground.rotation.x = -Math.PI / 2;
+      ground.position.y = -2.2;
+      ground.receiveShadow = true;
+      scene.add(ground);
+
+      // --- Lights
+      const hemi = new THREE.HemisphereLight(0xffecd2, 0x0a0b10, 0.6);
+      scene.add(hemi);
+      const dir = new THREE.DirectionalLight(0xffe6a8, 0.7);
+      dir.position.set(-6, 10, 6);
+      scene.add(dir);
+
+      // --- Parameters
+      const params = {
+        sunRadius: 1.3,
+        particleCount: 8000,
+        emissionRadius: 1.14,
+        emissionRate: 1.0,
+        swirl: 0.15,
+        flicker: 0.9,
+        sizeMin: 2.0,
+        sizeMax: 7.0,
+        colorInner: "#d9c036",
+        colorOuter: "#c2660f",
+        // particle life
+        lifeMin: 3.5,
+        lifeMax: 7.0,
+        baseAlpha: 0.63,
+        // heat haze
+        hazeStrength: 0.0075,
+        hazeRadius: 0.42,
+        hazeTimeScale: 0.7,
+        // bloom
+        bloom: 0.5,
+        bloomRadius: 0.68,
+        bloomThreshold: 0.18,
+        // warm-up to avoid bright flash
+        warmupSec: 1.6,
+        startExposure: 0.85,
+        targetExposure: 1.0,
+      };
+      renderer.toneMappingExposure = params.startExposure;
+
+      // --- Sun (emissive + glow shell)
+      const sunMat = new THREE.MeshBasicMaterial({ color: 0xffffff });
+      const sunGeo = new THREE.SphereGeometry(params.sunRadius, 48, 48);
+      const sun = new THREE.Mesh(sunGeo, sunMat);
+      scene.add(sun);
+
+      const sunGlow = new THREE.Mesh(
+        new THREE.SphereGeometry(params.sunRadius * 1.03, 48, 48),
+        new THREE.ShaderMaterial({
+          transparent: true,
+          depthWrite: false,
+          blending: THREE.AdditiveBlending,
+          uniforms: {
+            uTime: { value: 0 },
+            uInner: { value: new THREE.Color(params.colorInner) },
+            uOuter: { value: new THREE.Color(params.colorOuter) },
+          },
+          vertexShader: /*glsl*/ `
+            varying vec3 vPos;
+            void main(){
+              vPos = position;
+              gl_Position = projectionMatrix * modelViewMatrix * vec4(position,1.0);
+            }
+          `,
+          fragmentShader: /*glsl*/ `
+            varying vec3 vPos;
+            uniform float uTime;
+            uniform vec3 uInner, uOuter;
+            float hash(vec3 p){ return fract(sin(dot(p, vec3(17.1, 31.7, 57.3))) * 43758.5453); }
+            float noise(vec3 p){
+              vec3 i=floor(p), f=fract(p);
+              float n=0.0;
+              for(int x=0;x<2;x++) for(int y=0;y<2;y++) for(int z=0;z<2;z++){
+                vec3 o=vec3(float(x),float(y),float(z));
+                float w = dot(f-o, f-o);
+                n += (1.0-w) * hash(i+o);
+              }
+              return clamp(n,0.0,1.0);
+            }
+            void main(){
+              vec3 p = normalize(vPos)*2.0 + vec3(uTime*0.1, uTime*0.07, 0.0);
+              float n = noise(p*3.0);
+              vec3 col = mix(uInner, uOuter, smoothstep(0.3,0.9,n));
+              float alpha = 0.6 + 0.4*n;
+              gl_FragColor = vec4(col, alpha);
+            }
+          `,
+        })
+      );
+      scene.add(sunGlow);
+
+      // --- Heat Particles
+      const particleGeo = new THREE.BufferGeometry();
+      const N = params.particleCount;
+      const positions = new Float32Array(N * 3);
+      const velocities = new Float32Array(N * 3);
+      const sizes = new Float32Array(N);
+      const hueT = new Float32Array(N);
+      const births = new Float32Array(N);
+      const lifes = new Float32Array(N);
+      const rnd = (a = 0, b = 1) => a + Math.random() * (b - a);
+
+      for (let i = 0; i < N; i++) {
+        const a = rnd(0, Math.PI * 2);
+        const z = rnd(-1, 1);
+        const r = Math.sqrt(1 - z * z);
+        const nx = r * Math.cos(a),
+          ny = z,
+          nz = r * Math.sin(a);
+
+        positions[i * 3 + 0] = nx * params.emissionRadius;
+        positions[i * 3 + 1] = ny * params.emissionRadius;
+        positions[i * 3 + 2] = nz * params.emissionRadius;
+
+        const up = new THREE.Vector3(
+          nx,
+          Math.abs(ny) * 1.3 + 1.2,
+          nz
+        ).normalize();
+        velocities[i * 3 + 0] = up.x * rnd(0.6, 1.3);
+        velocities[i * 3 + 1] = up.y * rnd(0.8, 1.7);
+        velocities[i * 3 + 2] = up.z * rnd(0.6, 1.3);
+
+        sizes[i] = rnd(params.sizeMin, params.sizeMax);
+        hueT[i] = rnd(0.0, 1.0);
+
+        lifes[i] = rnd(params.lifeMin, params.lifeMax);
+        births[i] = rnd(0.0, lifes[i]); // 분산된 시작점
+      }
+
+      particleGeo.setAttribute(
+        "position",
+        new THREE.BufferAttribute(positions, 3)
+      );
+      particleGeo.setAttribute(
+        "aVelocity",
+        new THREE.BufferAttribute(velocities, 3)
+      );
+      particleGeo.setAttribute("aSize", new THREE.BufferAttribute(sizes, 1));
+      particleGeo.setAttribute("aHueT", new THREE.BufferAttribute(hueT, 1));
+      particleGeo.setAttribute("aBirth", new THREE.BufferAttribute(births, 1));
+      particleGeo.setAttribute("aLife", new THREE.BufferAttribute(lifes, 1));
+
+      const particleMat = new THREE.ShaderMaterial({
+        transparent: true,
+        depthWrite: false,
+        blending: THREE.AdditiveBlending,
+        uniforms: {
+          uTime: { value: 0 },
+          uSwirl: { value: params.swirl },
+          uEmission: { value: params.emissionRate },
+          uFlicker: { value: params.flicker },
+          uInner: { value: new THREE.Color(params.colorInner) },
+          uOuter: { value: new THREE.Color(params.colorOuter) },
+          uSizeScale: { value: 1.0 * renderer.getPixelRatio() },
+          uBaseAlpha: { value: params.baseAlpha },
+        },
+        vertexShader: /*glsl*/ `
+          uniform float uTime, uSwirl, uEmission, uFlicker, uSizeScale;
+          attribute vec3 aVelocity;
+          attribute float aSize;
+          attribute float aHueT;
+          attribute float aBirth;
+          attribute float aLife;
+          varying float vProg;
+          varying float vHue;
+
+          mat3 rotY(float a){
+            float c=cos(a), s=sin(a);
+            return mat3(c,0.,-s,  0.,1.,0.,  s,0.,c);
+          }
+          void main(){
+            float age = mod(uTime + aBirth, aLife);
+            float prog = age / aLife;
+            vProg = prog;
+            vHue = aHueT;
+
+            vec3 pos = position + aVelocity * age * uEmission;
+
+            float swirl = uSwirl * 0.7 * (0.6 + 0.4*sin(dot(position, vec3(2.3,1.7,3.1)) + uTime*0.8));
+            pos = rotY(swirl * age) * pos;
+            pos *= (1.0 + 0.03 * sin(uTime + aHueT*6.28));
+
+            float flick = 1.0 + uFlicker * 0.35 * sin(uTime*6.0 + aHueT*12.3);
+
+            gl_Position = projectionMatrix * modelViewMatrix * vec4(pos, 1.0);
+            gl_PointSize = aSize * uSizeScale * (1.0 + 0.25 * (pos.y*0.15));
+            gl_PointSize *= flick;
+          }
+        `,
+        fragmentShader: /*glsl*/ `
+          precision mediump float;
+          varying float vProg;
+          varying float vHue;
+          uniform vec3 uInner, uOuter;
+          uniform float uBaseAlpha;
+
+          void main(){
+            vec2 uv = gl_PointCoord * 2.0 - 1.0;
+            float r = length(uv);
+            if(r>1.0) discard;
+
+            float core = smoothstep(1.0, 0.2, r);
+            float birthFade  = smoothstep(0.0, 0.15, vProg);
+            float deathFade  = 1.0 - smoothstep(0.75, 1.0, vProg);
+            float lifeAlpha  = birthFade * deathFade;
+
+            vec3 col = mix(uInner, uOuter, vHue);
+            float alpha = core * lifeAlpha * uBaseAlpha;
+
+            gl_FragColor = vec4(col, alpha);
+          }
+        `,
+      });
+
+      const particles = new THREE.Points(particleGeo, particleMat);
+      scene.add(particles);
+
+      // --- Postprocessing: Bloom + Heat Haze
+      const composer = new EffectComposer(renderer);
+      const renderPass = new RenderPass(scene, camera);
+      composer.addPass(renderPass);
+
+      const bloomPass = new UnrealBloomPass(
+        new THREE.Vector2(window.innerWidth, window.innerHeight),
+        params.bloom,
+        params.bloomRadius,
+        params.bloomThreshold
+      );
+      composer.addPass(bloomPass);
+
+      // Heat Haze (screen-space refract near the sun)
+      const HeatHazeShader = {
+        uniforms: {
+          tDiffuse: { value: null },
+          uTime: { value: 0 },
+          uCenter: { value: new THREE.Vector2(0.5, 0.5) },
+          uRadius: { value: params.hazeRadius },
+          uStrength: { value: params.hazeStrength },
+          uSpeed: { value: params.hazeTimeScale },
+          uAspect: { value: window.innerWidth / window.innerHeight },
+        },
+        vertexShader: /*glsl*/ `
+          varying vec2 vUv;
+          void main(){
+            vUv = uv;
+            gl_Position = vec4(position,1.0);
+          }
+        `,
+        fragmentShader: /*glsl*/ `
+          precision mediump float;
+          uniform sampler2D tDiffuse;
+          uniform vec2 uCenter;
+          uniform float uRadius, uStrength, uSpeed, uAspect, uTime;
+          varying vec2 vUv;
+
+          float hash(vec2 p){ return fract(sin(dot(p, vec2(127.1,311.7))) * 43758.5453); }
+          float noise(vec2 p){
+            vec2 i=floor(p), f=fract(p);
+            float a=hash(i), b=hash(i+vec2(1.,0.));
+            float c=hash(i+vec2(0.,1.)), d=hash(i+vec2(1.,1.));
+            vec2 u=f*f*(3.0-2.0*f);
+            return mix(a,b,u.x) + (c-a)*u.y*(1.0-u.x) + (d-b)*u.x*u.y;
+          }
+
+          void main(){
+            vec2 uv = vUv;
+            vec2 c = uCenter;
+            vec2 d = uv - c;
+            d.x *= uAspect;
+            float dist = length(d);
+            float falloff = smoothstep(1.0, 0.0, dist / uRadius);
+
+            float n1 = noise(uv*6.0 + vec2(uTime*uSpeed, 0.0));
+            float n2 = noise(uv*9.0 + vec2(0.0, uTime*uSpeed*1.3));
+            float n = (n1*0.6 + n2*0.4) - 0.5;
+
+            vec2 offset = normalize(d) * n * uStrength * falloff;
+            uv += offset;
+
+            gl_FragColor = texture2D(tDiffuse, uv);
+          }
+        `,
+      };
+      const heatHazePass = new ShaderPass(HeatHazeShader);
+      composer.addPass(heatHazePass);
+
+      // --- GUI
+      const gui = new GUI({ title: "Heat Rise Controls" });
+      gui
+        .add(params, "particleCount", 1000, 20000, 1000)
+        .name("Particles (reload)")
+        .onFinishChange(() => location.reload());
+      gui.add(params, "emissionRate", 0.4, 2.0, 0.02).name("Emission");
+      gui
+        .add(params, "swirl", 0.0, 2.5, 0.02)
+        .name("Swirl")
+        .onChange((v) => (particleMat.uniforms.uSwirl.value = v));
+      gui
+        .add(params, "flicker", 0.0, 1.5, 0.02)
+        .name("Flicker")
+        .onChange((v) => (particleMat.uniforms.uFlicker.value = v));
+      gui
+        .addColor(params, "colorInner")
+        .name("Inner")
+        .onChange((v) => {
+          particleMat.uniforms.uInner.value.set(v);
+          sunGlow.material.uniforms.uInner.value.set(v);
+        });
+      gui
+        .addColor(params, "colorOuter")
+        .name("Outer")
+        .onChange((v) => {
+          particleMat.uniforms.uOuter.value.set(v);
+          sunGlow.material.uniforms.uOuter.value.set(v);
+        });
+      gui
+        .add(params, "lifeMin", 2.0, 8.0, 0.1)
+        .name("Life Min")
+        .onFinishChange((v) => {
+          // 안내만: 실시간 변경은 생략(재생성 필요)
+        });
+      gui.add(params, "lifeMax", 3.0, 12.0, 0.1).name("Life Max");
+      gui
+        .add(params, "baseAlpha", 0.5, 1.2, 0.01)
+        .name("Particle Alpha")
+        .onChange((v) => (particleMat.uniforms.uBaseAlpha.value = v));
+
+      const fBloom = gui.addFolder("Bloom");
+      fBloom
+        .add(params, "bloom", 0.0, 2.0, 0.01)
+        .onChange((v) => (bloomPass.strength = v));
+      fBloom
+        .add(params, "bloomRadius", 0.0, 1.0, 0.01)
+        .onChange((v) => (bloomPass.radius = v));
+      fBloom
+        .add(params, "bloomThreshold", 0.0, 1.0, 0.01)
+        .onChange((v) => (bloomPass.threshold = v));
+
+      const fHaze = gui.addFolder("Heat Haze");
+      fHaze
+        .add(params, "hazeStrength", 0.0, 0.02, 0.0005)
+        .name("Strength")
+        .onChange((v) => (heatHazePass.uniforms.uStrength.value = v));
+      fHaze
+        .add(params, "hazeRadius", 0.1, 0.8, 0.01)
+        .name("Radius")
+        .onChange((v) => (heatHazePass.uniforms.uRadius.value = v));
+      fHaze
+        .add(params, "hazeTimeScale", 0.2, 2.0, 0.02)
+        .name("Flow Speed")
+        .onChange((v) => (heatHazePass.uniforms.uSpeed.value = v));
+
+      // --- Animation
+      let running = true;
+      let t = 0;
+
+      function animate() {
+        const dt = 0.016;
+        t += dt;
+
+        // Warm-up: 초반 과도한 밝기 완화
+        const k = Math.min(1, t / params.warmupSec);
+        renderer.toneMappingExposure = THREE.MathUtils.lerp(
+          params.startExposure,
+          params.targetExposure,
+          k
+        );
+        bloomPass.strength = THREE.MathUtils.lerp(0.35, params.bloom, k);
+
+        // Sun / Particles
+        sunGlow.material.uniforms.uTime.value = t;
+        particleMat.uniforms.uTime.value = t;
+
+        // Heat haze center = sun screen pos
+        const sunScreen = sun.position.clone().project(camera);
+        const sx = (sunScreen.x + 1) * 0.5;
+        const sy = (1 - sunScreen.y) * 0.5;
+        heatHazePass.uniforms.uCenter.value.set(sx, sy);
+        heatHazePass.uniforms.uTime.value = t;
+
+        controls.update();
+        composer.render();
+
+        if (running) requestAnimationFrame(animate);
+        else requestAnimationFrame(animate); // pause updates only if needed
+      }
+      requestAnimationFrame(animate);
+
+      // --- Resize
+      window.addEventListener("resize", () => {
+        const w = window.innerWidth,
+          h = window.innerHeight;
+        camera.aspect = w / h;
+        camera.updateProjectionMatrix();
+        renderer.setSize(w, h);
+        composer.setSize(w, h);
+        heatHazePass.uniforms.uAspect.value = w / h;
+      });
+
+      // --- Keyboard
+      window.addEventListener("keydown", (e) => {
+        if (e.code === "Space") running = !running;
+        if (e.key.toLowerCase() === "r") controls.reset();
+      });
+    </script>
+  </body>
+</html>
